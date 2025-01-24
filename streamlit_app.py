@@ -1,56 +1,117 @@
+import os
+import pandas as pd
 import streamlit as st
-from openai import OpenAI
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
-)
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+from langchain_experimental.tools.python.tool import PythonAstREPLTool
+from langchain_anthropic import ChatAnthropic
+from langgraph.prebuilt import create_react_agent
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+import uuid
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
+st.title("💬 Transform your data")
+st.caption("🚀 Ask me anything to do")
+
+llm = ChatAnthropic(model="claude-3-5-haiku-latest", temperature=0, api_key=st.secrets["ANTHROPIC_API_KEY"])  # type: ignore
+
+uploaded_file = st.file_uploader("Choose a file")
+if uploaded_file is not None:
+
+    # Can be used wherever a "file-like" object is accepted:
+    df = pd.read_csv(uploaded_file)
+
+    # Tools: Should be somewhere else
+    ####################################################
+    st.dataframe(df)
+
+    repl_tool = PythonAstREPLTool(locals={"df": df, "pd": pd})
+
+    def reprtool(code: str) -> pd.DataFrame:
+        """
+        Execute a Python code in REPL. It already has dataframe in variable `df` in the locals.
+        Always save final df to output.csv like this `df.to_csv("output.csv", index=False)`
+        and also return df
+        """
+        df = repl_tool.invoke(code)
+
+        return df
+
+    def describe():
+        """
+        Describe the dataframe
+        """
+        return df.describe()
+
+    def head():
+        """
+        Show the head of the dataframe
+        """
+        return df.head()
+
+    tools = [reprtool, describe, head]
+    system_prompt = """
+    You are expert in data transformation using pandas. Do not mention tools that you are using to user.
+    """
+    react = create_react_agent(llm, tools=tools, state_modifier=system_prompt)
+    #################################################################################################
+
     if "messages" not in st.session_state:
-        st.session_state.messages = []
+        st.session_state["messages"] = [
+            {"role": "assistant", "content": "What transformations you want me to do?"}
+        ]
+    for msg in st.session_state.messages:
+        st.chat_message(msg["role"]).write(msg["content"])
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    if prompt := st.chat_input():
+        st.chat_message("user").write(prompt)
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+        context = ""
+        msgs = []
+        for msg in st.session_state.messages:
+            if msg["role"] == "user":
+                msgs.append(HumanMessage(content=msg["content"]))
+            else:
+                msgs.append(AIMessage(content=msg["content"]))
 
-        # Store and display the current prompt.
+        msgs.append(HumanMessage(content=prompt))
+        output = None
+        for output in react.stream(
+            {"messages": msgs},
+            config={"thread_id": uuid.uuid1().hex},
+            stream_mode="values",
+        ):
+            last_message: AIMessage = output["messages"][-1]
+            if isinstance(last_message, ToolMessage):
+                continue
+
+            if isinstance(last_message, AIMessage):
+                try:
+                    # writing df to output.csv as it is difficult
+                    # to get df in message content
+                    if os.path.exists("output.csv"):
+                        df = pd.read_csv("output.csv")
+                        st.dataframe(data=df)
+                        os.remove("output.csv")
+
+                    # some hacks to seperate out tool call messages from AIMessage
+                    if isinstance(last_message.content, list):
+                        if "text" in last_message.content[0]:
+                            content = last_message.content[0]["text"]
+                            st.chat_message("assistant").write(content)
+                            st.session_state.messages.append(
+                                {"role": "assistant", "content": content}
+                            )
+                    else:
+                        content = last_message.content
+                        st.chat_message("assistant").write(content)
+                        st.session_state.messages.append(
+                            {"role": "assistant", "content": content}
+                        )
+                except Exception as e:
+                    raise e
+                    breakpoint()
+
         st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
-
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+        st.session_state.messages.append({"role": "assistant", "content": content})
