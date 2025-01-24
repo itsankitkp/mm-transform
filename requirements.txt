@@ -1,2 +1,7 @@
 streamlit
 openai
+pandas
+langchain_core
+langchain_experimental
+langchain_anthropic
+langgraph
