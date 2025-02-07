@@ -27,6 +27,7 @@ if uploaded_file is not None:
 
     repl_tool = PythonAstREPLTool(locals={"df": df, "pd": pd})
 
+
     def reprtool(code: str) -> pd.DataFrame:
         """
         Execute a Python code in REPL. It already has dataframe in variable `df` in the locals.
@@ -52,6 +53,7 @@ if uploaded_file is not None:
     tools = [reprtool, describe, head]
     system_prompt = """
     You are expert in data transformation using pandas. Do not mention tools that you are using to user.
+    Always ensure that end result is correct and no data is empty unless it is needed to be.
     """
     react = create_react_agent(llm, tools=tools, state_modifier=system_prompt)
     #################################################################################################
